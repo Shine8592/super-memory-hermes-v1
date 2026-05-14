@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""
+Semantic Memory Search with Sentence Transformers
+Uses pre-trained embeddings for high-quality semantic search
+"""
+
+import os
+import sys
+import json
+import hashlib
+from pathlib import Path
+from typing import List, Dict, Optional
+import time
+
+import numpy as np
+
+import faiss
+# Check for required packages
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+    print("Error: sentence-transformers not installed")
+    print("Please install: pip install sentence-transformers")
+    sys.exit(1)
+
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+
+# Configuration
+MODEL_NAME = "all-MiniLM-L6-v2"  # Small, fast, good quality model
+MEMORY_DIR = Path.home() / ".hermes" / "memory"
+INDEX_PATH = MEMORY_DIR / "semantic_index.faiss"
+METADATA_PATH = MEMORY_DIR / "semantic_metadata.json"
+MODEL_PATH = MEMORY_DIR / "semantic_model"
+
+class SemanticMemorySearch:
+    """Semantic memory search system"""
+    
+    def __init__(self):
+        self.model = None
+        self.index = None
+        self.metadata = []
+        self.dimension = 384  # all-MiniLM-L6-v2 output dimension
+        
+    def load_model(self):
+        """Load or download the sentence transformer model"""
+        print(f"\n🧠 Loading semantic model: {MODEL_NAME}")
+        print("   This is a small, fast model (~80MB download)")
+        start_time = time.time()
+        
+        try:
+            # Try to load from cache or download
+            print("   Downloading/loading model (one-time setup)...")
+            self.model = SentenceTransformer(MODEL_NAME)
+            
+            # Save model locally for future use
+            MODEL_PATH.mkdir(parents=True, exist_ok=True)
+            self.model.save(str(MODEL_PATH))
+            
+            elapsed = time.time() - start_time
+            print(f"✅ Model loaded in {elapsed:.1f}s")
+            print(f"   Dimension: {self.dimension}")
+            print(f"   Local cache: {MODEL_PATH}")
+            
+        except Exception as e:
+            print(f"❌ Error loading model: {e}")
+            # Try offline mode
+            print("   Trying offline mode...")
+            if MODEL_PATH.exists():
+                self.model = SentenceTransformer(str(MODEL_PATH))
+                print("✅ Model loaded from local cache")
+            else:
+                raise
+    
+    def load_text_chunks(self) -> List[Dict]:
+        """Load text chunks from memory files"""
+        chunks = []
+        
+        # Core memory files
+        core_files = ["MEMORY.md", "SOUL.md", "TOOLS.md", "USER.md", "AGENTS.md", "IDENTITY.md"]
+        
+        print("\n📄 Loading text chunks...")
+        for filename in core_files:
+            file_path = MEMORY_DIR.parent / filename
+            if not file_path.exists():
+                continue
+            
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Split into sections
+                sections = content.split("\n## ")
+                for i, section in enumerate(sections):
+                    if not section.strip():
+                        continue
+                    
+                    if not section.startswith("#"):
+                        section = "## " + section
+                    
+                    section = section.strip()
+                    if len(section) > 2000:
+                        section = section[:2000] + "..."
+                    
+                    if len(section) > 50:  # Skip very short sections
+                        chunks.append({
+                            "id": f"{filename}:{i}",
+                            "text": section,
+                            "source": filename,
+                            "type": "core_memory",
+                            "chunk_index": i
+                        })
+            except Exception as e:
+                print(f"  ⚠ Error reading {file_path}: {e}")
+        
+        # Daily logs
+        daily_dir = MEMORY_DIR / "daily"
+        if daily_dir.exists():
+            for file_path in sorted(daily_dir.glob("*.md")):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    if content.strip() and len(content) > 50:
+                        chunks.append({
+                            "id": f"daily/{file_path.name}:0",
+                            "text": content.strip(),
+                            "source": f"daily/{file_path.name}",
+                            "type": "daily_log"
+                        })
+                except Exception as e:
+                    print(f"  ⚠ Error reading {file_path}: {e}")
+        
+        # REM sleep logs (dreams)
+        rem_dir = MEMORY_DIR / "dreaming" / "rem"
+        if rem_dir.exists():
+            for file_path in sorted(rem_dir.glob("*.md")):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    sections = content.split("\n# ")
+                    for i, section in enumerate(sections):
+                        if not section.strip() or len(section) < 50:
+                            continue
+                        
+                        if not section.startswith("#"):
+                            section = "# " + section
+                        
+                        section = section.strip()
+                        if len(section) > 1500:
+                            section = section[:1500] + "..."
+                        
+                        chunks.append({
+                            "id": f"dreaming/rem/{file_path.name}:{i}",
+                            "text": section,
+                            "source": f"dreaming/rem/{file_path.name}",
+                            "type": "dream_log",
+                            "chunk_index": i
+                        })
+                except Exception as e:
+                    print(f"  ⚠ Error reading {file_path}: {e}")
+        
+        return chunks
+    
+    def build_index(self):
+        """Build semantic search index"""
+        print("\n🚀 Building Semantic Memory Index")
+        print("=" * 60)
+        
+        # Load model
+        if not self.model:
+            self.load_model()
+        
+        # Load text chunks
+        chunks = self.load_text_chunks()
+        print(f"\n📊 Found {len(chunks)} chunks to index")
+        
+        if not chunks:
+            print("❌ No chunks found to index")
+            return False
+        
+        # Generate embeddings
+        print("\n🧠 Generating embeddings...")
+        start_time = time.time()
+        
+        texts = [chunk["text"] for chunk in chunks]
+        
+        # Batch processing for efficiency
+        batch_size = 32
+        all_embeddings = []
+        
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            print(f"  Processing batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}...", end=" ")
+            
+            batch_embeddings = self.model.encode(batch, show_progress_bar=False, convert_to_numpy=True)
+            all_embeddings.append(batch_embeddings)
+            print(f"✅")
+        
+        embeddings = np.vstack(all_embeddings)
+        elapsed = time.time() - start_time
+        
+        print(f"\n✅ Embeddings generated in {elapsed:.1f}s")
+        print(f"   Shape: {embeddings.shape}")
+        print(f"   Average: {elapsed/len(chunks):.2f}s per chunk")
+        
+        # Normalize embeddings for cosine similarity
+        print("\n🔧 Normalizing embeddings...")
+        faiss.normalize_L2(embeddings)
+        
+        # Build Faiss index
+        print("💾 Building Faiss index...")
+        index = faiss.IndexFlatIP(self.dimension)  # Inner product = cosine similarity for normalized vectors
+        index.add(embeddings)
+        
+        # Save index
+        print(f"   Saving to {INDEX_PATH}...")
+        faiss.write_index(index, str(INDEX_PATH))
+        
+        # Save metadata
+        metadata = []
+        for i, chunk in enumerate(chunks):
+            metadata.append({
+                **chunk,
+                "embedding_index": i,
+                "hash": hashlib.md5(chunk["text"].encode()).hexdigest()[:12]
+            })
+        
+        with open(METADATA_PATH, 'w') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        
+        print(f"   Metadata saved to {METADATA_PATH}")
+        
+        print(f"\n{'=' * 60}")
+        print(f"✅ INDEX BUILT SUCCESSFULLY!")
+        print(f"{'=' * 60}")
+        print(f"   Total chunks: {len(metadata)}")
+        print(f"   Embedding dim: {self.dimension}")
+        print(f"   Model: {MODEL_NAME}")
+        print(f"   Index: {INDEX_PATH}")
+        print(f"   Metadata: {METADATA_PATH}")
+        
+        self.index = index
+        self.metadata = metadata
+        
+        return True
+    
+    def load_index(self):
+        """Load existing index"""
+        print("\n📂 Loading existing index...")
+        
+        if not INDEX_PATH.exists():
+            print("❌ Index not found. Run build_index() first.")
+            return False
+        
+        if not METADATA_PATH.exists():
+            print("❌ Metadata not found.")
+            return False
+        
+        # Load model
+        if not self.model:
+            self.load_model()
+        
+        # Load index
+        print(f"   Loading index from {INDEX_PATH}...")
+        self.index = faiss.read_index(str(INDEX_PATH))
+        
+        # Load metadata
+        print(f"   Loading metadata from {METADATA_PATH}...")
+        with open(METADATA_PATH, 'r') as f:
+            self.metadata = json.load(f)
+        
+        print(f"✅ Index loaded: {len(self.metadata)} chunks")
+        return True
+    
+    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+        """Search for similar chunks"""
+        
+        if not self.index:
+            if not self.load_index():
+                return []
+        
+        # Encode query
+        print(f"\n🧠 Encoding query...")
+        query_embedding = self.model.encode([query], convert_to_numpy=True)
+        faiss.normalize_L2(query_embedding)
+        
+        # Search
+        print(f"🔍 Searching for top {top_k} results...")
+        scores, indices = self.index.search(query_embedding, top_k)
+        
+        # Build results
+        results = []
+        for i, (idx, score) in enumerate(zip(indices[0], scores[0])):
+            if idx < len(self.metadata):
+                results.append({
+                    **self.metadata[idx],
+                    "similarity": float(score),
+                    "rank": i + 1
+                })
+        
+        return results
+
+def print_results(results: List[Dict]):
+    """Pretty print search results"""
+    if not results:
+        print("\n❌ No results found.")
+        return
+    
+    print(f"\n{'=' * 70}")
+    print(f"📊 Top {len(results)} Results")
+    print(f"{'=' * 70}\n")
+    
+    type_icons = {
+        "core_memory": "📚",
+        "daily_log": "📅",
+        "dream_log": "🌙"
+    }
+    
+    for result in results:
+        icon = type_icons.get(result.get("type", ""), "📄")
+        similarity = result.get("similarity", 0)
+        
+        print(f"{icon} Rank {result['rank']} (Relevance: {similarity:.4f})")
+        print(f"   📄 Source: {result['source']}")
+        print(f"   🔍 ID: {result['id']}")
+        
+        text = result['text']
+        if len(text) > 300:
+            text = text[:300] + "..."
+        print(f"   💬 {text}\n")
+
+def main():
+    """Main CLI interface"""
+    print("🚀 Semantic Memory Search System")
+    print("   Model: all-MiniLM-L6-v2 (Sentence Transformers)\n")
+    
+    searcher = SemanticMemorySearch()
+    
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  python semantic_search.py build        # Build search index")
+        print("  python semantic_search.py search <q>   # Search")
+        print("  python semantic_search.py status        # Check status")
+        return
+    
+    command = sys.argv[1]
+    
+    if command == "build":
+        success = searcher.build_index()
+        sys.exit(0 if success else 1)
+    
+    elif command == "search":
+        if len(sys.argv) < 3:
+            print("❌ Please provide a search query")
+            return
+        
+        query = " ".join(sys.argv[2:])
+        print(f"\n🔍 Semantic Search: '{query}'")
+        
+        results = searcher.search(query, top_k=5)
+        print_results(results)
+    
+    elif command == "status":
+        print("\n📋 System Status")
+        print(f"   Model: {MODEL_NAME}")
+        print(f"   Model cache: {'✅' if MODEL_PATH.exists() else '❌'}")
+        print(f"   Index: {'✅' if INDEX_PATH.exists() else '❌'}")
+        print(f"   Metadata: {'✅' if METADATA_PATH.exists() else '❌'}")
+        
+        if METADATA_PATH.exists():
+            with open(METADATA_PATH, 'r') as f:
+                metadata = json.load(f)
+            print(f"   Indexed chunks: {len(metadata)}")
+            
+            types = {}
+            for item in metadata:
+                t = item.get("type", "unknown")
+                types[t] = types.get(t, 0) + 1
+            
+            for t, count in types.items():
+                print(f"     - {t}: {count}")
+    
+    else:
+        print(f"❌ Unknown command: {command}")
+
+if __name__ == "__main__":
+    main()
