@@ -1,3 +1,17 @@
+# Super‑Memory‑Hermes‑V1 (Iterated)
+
+## What is new in this iteration?
+
+- **custom_scripts/** – a set of helper scripts that implement:
+  - `post_process_log.py` – automatically persist each assistant turn into the SQLite `logs` table.
+  - `generate_mermaid.py` – converts short‑term STM JSON logs into a compact Mermaid graph for LLM context.
+  - `upgrade_memory.py` – promotes important logs to `MEMORY.md` with a Markdown‑style promotion summary.
+  - `backup_sqlite.sh` – creates a SQL dump of the memory database.
+  - `backup_and_sync.sh` – archives the dump, emails it via Himalaya (to `yaner_zf@126.com`) and pushes the archive to a backup repository. **No secrets are stored in the repo**; the GitHub token must be supplied at runtime (e.g. via `GIT_ASKPASS`).
+- **skills/memory-system/** – the full memory‑system Skill (SKILL.md and references) is now part of the repo for easy loading with `skill_view(name="memory-system")`.
+- **.gitignore** – explicitly excludes all private data files.
+
+---
 # 🧠 嘟嘟超级记忆系统 - Hermes 版本 V1
 
 > 基于 SuperMemo-Du 架构的语义向量记忆系统，专门为 Hermes Agent 设计。
