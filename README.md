@@ -7,7 +7,7 @@
   - `generate_mermaid.py` – converts short‑term STM JSON logs into a compact Mermaid graph for LLM context.
   - `upgrade_memory.py` – promotes important logs to `MEMORY.md` with a Markdown‑style promotion summary.
   - `backup_sqlite.sh` – creates a SQL dump of the memory database.
-  - `backup_and_sync.sh` – archives the dump, emails it via Himalaya (to `${BACKUP_EMAIL:-your_backup_email@example.com}`) and pushes the archive to a backup repository. **No secrets are stored in the repo**; the GitHub token must be supplied at runtime (e.g. via `GIT_ASKPASS`).
+  - `backup_and_sync.sh` – archives the dump, emails it via Himalaya (to `${BACKUP_EMAIL:-your_backup_email@example.com}`) and pushes the archive to a backup repository (default `${BACKUP_REPO:-https://github.com/Shine8592/hermes-backup.git}`). **No secrets are stored in the repo**; the GitHub token must be supplied at runtime (e.g. via `GIT_ASKPASS`).
 - **skills/memory-system/** – the full memory‑system Skill (SKILL.md and references) is now part of the repo for easy loading with `skill_view(name="memory-system")`.
 - **.gitignore** – explicitly excludes all private data files.
 
